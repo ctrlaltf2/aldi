@@ -2,13 +2,17 @@
 # /// script
 # requires-python = "==3.13"
 # dependencies = [
-#     "httpx"
+#     "duckdb",
+#     "fsspec",
+#     "httpx",
 # ]
 # ///
+from datetime import datetime, timezone
 from pathlib import Path
 from string import Template
 import argparse
-import datetime
+import duckdb
+import fsspec
 import httpx
 import json
 import random
@@ -25,8 +29,10 @@ parser.add_argument('-r', '--region', type=int, required=True, help='Region numb
 # See above. If your specific store doesn't show up in the search,
 # check your physical receipt for the store number.
 parser.add_argument('-s', '--store', type=int, required=True, help='Store number (e.g. 40)')
-
+parser.add_argument('-d', '--db', type=str, required=True, help='Path to output prices database')
 args = parser.parse_args()
+
+output_db_path = Path(args.db)
 
 # --- Store config
 region_number = f'{args.region:03}'
@@ -53,17 +59,6 @@ headers = {
 url = Template('https://api.aldi.us/v3/product-search?currency=USD&q=&limit=$limit&offset=$offset&sort=name_asc&servicePoint=$region-$store')
 # ---
 
-timestr = (datetime.datetime
-           .now()
-           .replace(microsecond=0, second=0)
-           .isoformat()
-           .replace(':', '')
-           [:-2]
-           )
-timestr = f'{timestr}-{region_number}-{store_number}'
-output_dir = Path('.') / timestr
-output_dir.mkdir(exist_ok=False)
-
 end_index = None
 current_index = 0
 
@@ -75,37 +70,108 @@ def gen_time(failures: int, min_sleep: float, max_sleep: float) -> float:
 
     return sleep_time
 
-failures = 0
-while (not end_index) or (current_index <= end_index):
-    sleep_time = gen_time(failures, min_sleep, max_sleep)
-    print(f'Sleeping for {sleep_time}s...')
-    time.sleep(sleep_time)
-    this_url = url.substitute(
-            {
-                'limit': page_limit,
-                'offset': current_index,
-                'region': region_number,
-                'store': store_number,
-            }
+with duckdb.connect(output_db_path) as conn:
+    create_table_products = (
+        "CREATE TABLE IF NOT EXISTS products ("
+            "timestamp TIMESTAMPTZ, "
+            "storeCode VARCHAR, "
+            "sku VARCHAR, "
+            "name VARCHAR, "
+            "brandName VARCHAR, "
+            "urlSlugText VARCHAR, "
+            "discontinued BOOLEAN, "
+            "discontinuedNote VARCHAR, "
+            "notForSale BOOLEAN, "
+            "notForSaleReason VARCHAR, "
+            "quantityMin FLOAT, "
+            "quantityMax FLOAT, "
+            "quantityInterval FLOAT, "
+            "quantityDefault FLOAT, "
+            "quantityUnit VARCHAR, "
+            "weightType VARCHAR, "
+            "sellingSize VARCHAR, "
+            "priceAmount INTEGER, "
+            "priceAmountRelevant INTEGER, "
+            "priceComparison INTEGER, "
+            "priceCurrencyCode VARCHAR, "
+            "pricePerUnit FLOAT, "
+            "pricePerUnitDisplay VARCHAR, "
+            "assets STRUCT(url VARCHAR, maxWidth BIGINT, maxHeight BIGINT, mimeType VARCHAR, assetType VARCHAR)[]"
+        ");"
     )
-    print(f'GET {this_url}')
-    response = httpx.get(this_url, headers=headers)
 
-    # Exp retry last request if error
-    if response.status_code != 200:
-        print('Failed, retrying.')
-        failures += 1
-        continue
-    else:
-        failures = 0
+    conn.sql(create_table_products)
 
-    js = response.json()
+    failures = 0
+    while (not end_index) or (current_index <= end_index):
+        sleep_time = gen_time(failures, min_sleep, max_sleep)
+        print(f'Sleeping for {sleep_time}s...')
+        time.sleep(sleep_time)
+        this_url = url.substitute(
+                {
+                    'limit': page_limit,
+                    'offset': current_index,
+                    'region': region_number,
+                    'store': store_number,
+                }
+        )
+        print(f'GET {this_url}')
+        response = httpx.get(this_url, headers=headers)
 
-    if end_index is None:
-        end_index = int(js['meta']['pagination']['totalCount'])
+        # Exp retry last request if error
+        if response.status_code != 200:
+            print('Failed, retrying.')
+            failures += 1
+            continue
+        else:
+            failures = 0
 
-    # Dump response to file for now
-    with open(output_dir / f'{str(current_index)}.json', 'w') as f:
-        json.dump(js, f)
+        js = response.json()
 
-    current_index += page_limit
+        if end_index is None:
+            end_index = int(js['meta']['pagination']['totalCount'])
+
+        # Hacky way to get the json readable from duckdb read_json
+        with fsspec.filesystem('memory').open(f'{str(current_index)}.json', 'w') as f:
+            json.dump(js, f)
+
+        conn.register_filesystem(fsspec.filesystem('memory'))
+
+        insert = f"""
+            INSERT INTO products WITH actual_table AS (
+                WITH rows_packed AS (
+                    SELECT unnest(data) AS data
+                        FROM read_json('memory://{str(current_index)}.json')
+                ) SELECT unnest(data) FROM rows_packed
+            ) SELECT
+                TIMESTAMP '{datetime.utcnow().replace(tzinfo=timezone.utc).isoformat()}' as timestamp,
+                '{region_number}-{store_number}' as storeCode,
+                sku,
+                name,
+                brandName,
+                urlSlugText,
+                discontinued,
+                discontinuedNote,
+                notForSale,
+                notForSaleReason,
+                quantityMin,
+                quantityMax,
+                quantityInterval,
+                quantityDefault,
+                quantityUnit,
+                weightType,
+                sellingSize,
+                price.amount as priceAmount,
+                price.amountRelevant as priceAmountRelevant,
+                price.comparison as priceComparison,
+                price.currencyCode as currencyCode,
+                price.perUnit as pricePerUnit,
+                price.perUnitDisplay as pricePerUnitDisplay,
+                assets
+            FROM actual_table;
+        """
+
+        conn.sql(insert)
+        current_index += page_limit
+
+    conn.table("products").show()
