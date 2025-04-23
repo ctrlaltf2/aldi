@@ -153,7 +153,7 @@ with duckdb.connect(output_db_path) as conn:
                         FROM read_json('memory://{str(current_index)}.json')
                 ) SELECT unnest(data) FROM rows_packed
             ) SELECT
-                TIMESTAMP '{datetime.utcnow().replace(tzinfo=timezone.utc).isoformat()}' as timestamp,
+                TIMESTAMPTZ '{datetime.now(timezone.utc).isoformat()}' as timestamp,
                 '{region_number}-{store_number}' as storeCode,
                 sku,
                 name,
