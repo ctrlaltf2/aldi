@@ -47,8 +47,8 @@ page_limit = 60
 # ---
 
 # --- Scraper config
-min_sleep = 2433  # ms
-max_sleep = 6151  # ms
+min_sleep = 7433  # ms
+max_sleep = 10151  # ms
 headers = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:135.0) Gecko/20100101 Firefox/135.0",
     "Accept": "application/json, text/plain, */*",
@@ -112,7 +112,7 @@ with duckdb.connect(output_db_path) as conn:
     conn.sql(create_table_products)
 
     failures = 0
-    while (not end_index) or (current_index <= end_index):
+    while (not end_index) or (current_index < end_index):
         sleep_time = gen_time(failures, min_sleep, max_sleep)
         print(f"Sleeping for {sleep_time}s...")
         time.sleep(sleep_time)
@@ -125,10 +125,22 @@ with duckdb.connect(output_db_path) as conn:
             }
         )
         print(f"GET {this_url}")
-        response = httpx.get(this_url, headers=headers)
+
+        failed = False
+
+        try:
+            response = httpx.get(this_url, headers=headers)
+            if response.status_code != 200:
+                failed = True
+        except httpx.ConnectTimeout:
+            failed = True
+
 
         # Exp retry last request if error
-        if response.status_code != 200:
+        if failed:
+            if failures == 15:
+                break
+
             print("Failed, retrying.")
             failures += 1
             continue
@@ -139,6 +151,9 @@ with duckdb.connect(output_db_path) as conn:
 
         if end_index is None:
             end_index = int(js["meta"]["pagination"]["totalCount"])
+
+        if len(js["data"]) == 0:
+            break
 
         # Hacky way to get the json readable from duckdb read_json
         with fsspec.filesystem("memory").open(f"{str(current_index)}.json", "w") as f:
