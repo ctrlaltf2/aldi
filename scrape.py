@@ -105,7 +105,6 @@ with duckdb.connect(output_db_path) as conn:
         "priceCurrencyCode VARCHAR, "
         "pricePerUnit FLOAT, "
         "pricePerUnitDisplay VARCHAR, "
-        "assets STRUCT(url VARCHAR, maxWidth BIGINT, maxHeight BIGINT, mimeType VARCHAR, assetType VARCHAR)[]"
         ");"
     )
 
@@ -191,7 +190,6 @@ with duckdb.connect(output_db_path) as conn:
                 price.currencyCode as currencyCode,
                 price.perUnit as pricePerUnit,
                 price.perUnitDisplay as pricePerUnitDisplay,
-                assets
             FROM actual_table;
         """
 
