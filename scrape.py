@@ -46,6 +46,9 @@ store_number = f"{args.store:03}"
 page_limit = 60
 # ---
 
+# on max timeout, just give up
+max_timeout = 4 * 60 * 60 * 1000 # ms, or 4 hours
+
 # --- Scraper config
 min_sleep = 7433  # ms
 max_sleep = 10151  # ms
@@ -112,6 +115,12 @@ with duckdb.connect(output_db_path) as conn:
 
     failures = 0
     while (not end_index) or (current_index < end_index):
+
+        max_given_failures = 2**failures
+        if max_given_failures > max_timeout:
+            # give up at this point
+            break
+
         sleep_time = gen_time(failures, min_sleep, max_sleep)
         print(f"Sleeping for {sleep_time}s...")
         time.sleep(sleep_time)
